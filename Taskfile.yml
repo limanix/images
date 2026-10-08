@@ -1,0 +1,85 @@
+# yaml-language-server: $schema=https://taskfile.dev/schema.json
+version: '3.53.1'
+
+includes:
+  nix:
+    # v0.0.5
+    taskfile: https://raw.githubusercontent.com/mr-chelyshkin/tasks/81255f635d839a2b46417720676cd2bebfc10cff/taskfiles/nix/Taskfile.yml
+    internal: true
+  markdown:
+    # v0.0.5
+    taskfile: https://raw.githubusercontent.com/mr-chelyshkin/tasks/81255f635d839a2b46417720676cd2bebfc10cff/taskfiles/markdown/Taskfile.yml
+    internal: true
+
+vars:
+  markdown_paths: README.md
+
+  image_build_context:
+    map:
+      CONTAINER_RUN_ARGS: >-
+        --security-opt seccomp=unconfined --security-opt apparmor=unconfined
+        --cap-add=DAC_OVERRIDE --cap-add=CHOWN --cap-add=FOWNER
+        --cap-add=SETUID --cap-add=SETGID --cap-add=KILL
+      CONTAINER_VOLUMES: limanix-images-nix:/nix
+
+tasks:
+  ci/nixos/fmt:
+    desc: Check Nix formatting
+    cmds:
+      - task: nix:nixfmt
+
+  ci/nixos/lint:
+    desc: Lint Nix sources
+    cmds:
+      - task: nix:statix
+      - task: nix:deadnix
+
+  ci/markdown/fmt:
+    desc: Check Markdown formatting
+    cmds:
+      - task: markdown:fmt
+        vars:
+          FMT_PATHS: '{{.markdown_paths}}'
+          TASK_CONTEXT:
+            ref: 'merge (dict) (dict "CONTAINER_MOUNT_MODE" "ro") (.TASK_CONTEXT | default .)'
+
+  nixos/fmt/fix:
+    desc: Fix format Nix sources
+    cmds:
+      - task: nix:nixfmt
+        vars: { FMT_ARGS: '' }
+
+  markdown/fix:
+    desc: Fix format Markdown sources
+    cmds:
+      - task: markdown:fmt/fix
+        vars:
+          FMT_PATHS: '{{.markdown_paths}}'
+
+  release/version:
+    desc: Write the image version to dist/version
+    cmds:
+      - task: nix:_nix/tool
+        vars:
+          CMD: >-
+            sh -c 'mkdir -p dist && nix eval --extra-experimental-features "nix-command flakes"
+            --raw .#version > dist/version'
+
+  release/build:
+    desc: Build the base image
+    requires:
+      vars:
+        - name: ARCH
+          enum: [aarch64, x86_64]
+    vars:
+      ARCH: '{{.ARCH | default (ARCH | replace "arm64" "aarch64" | replace "amd64" "x86_64")}}'
+      host_arch: '{{ARCH | replace "arm64" "aarch64" | replace "amd64" "x86_64"}}'
+    preconditions:
+      - sh: test {{.ARCH | shellQuote}} = {{.host_arch | shellQuote}}
+        msg: Images build natively; build {{.ARCH}} on an {{.ARCH}} machine.
+    cmds:
+      - task: nix:_nix/tool
+        vars:
+          CMD: sh scripts/build-image.sh {{.ARCH}} {{.VERSION | default ""}}
+          TASK_CONTEXT:
+            ref: 'merge (dict) (.TASK_CONTEXT | default .) .image_build_context'

@@ -1,0 +1,187 @@
+name: Release
+
+on:
+  push:
+    branches: [main]
+    paths: [flake.nix, flake.lock, image.nix]
+  workflow_dispatch:
+
+concurrency:
+  group: release
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  version:
+    name: Version
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      tag: ${{ steps.tag.outputs.tag }}
+      version: ${{ steps.tag.outputs.version }}
+      alias: ${{ steps.tag.outputs.alias }}
+      alias-pattern: ${{ steps.tag.outputs.alias-pattern }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Read the image version
+        uses: mr-chelyshkin/actions/invoke-taskfile@v1
+        with:
+          command: release/version
+      - name: Choose the tag
+        id: tag
+        run: |
+          set -euo pipefail
+          base=$(cat dist/version)
+          if git tag --points-at HEAD | grep -qxE "v${base//./\\.}(\.[1-9][0-9]*)?"; then
+            echo "This revision is already released"
+            exit 0
+          fi
+          if ! git rev-parse -q --verify "refs/tags/v$base" > /dev/null; then
+            version=$base
+          else
+            last=0
+            for existing in $(git tag --list "v$base.*"); do
+              number=${existing#"v$base."}
+              if [[ "$number" =~ ^[1-9][0-9]*$ ]] && [ "$number" -gt "$last" ]; then
+                last=$number
+              fi
+            done
+            version="$base.$((last + 1))"
+          fi
+          release=$(printf '%s' "$base" | cut -d. -f1-2)
+          echo "Releasing $GITHUB_SHA as v$version"
+          {
+            echo "tag=v$version"
+            echo "version=$version"
+            echo "alias=v$release"
+            echo "alias-pattern=^v${release/./\\.}\\.[0-9]{8}(\\.[1-9][0-9]*)?\$"
+          } >> "$GITHUB_OUTPUT"
+
+  build:
+    name: Build (${{ matrix.arch }})
+    needs: version
+    if: needs.version.outputs.tag != ''
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 60
+    strategy:
+      matrix:
+        include:
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+          - { arch: x86_64, runner: ubuntu-24.04 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allow user namespaces for systemd-repart
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build the image
+        uses: mr-chelyshkin/actions/invoke-taskfile@v1
+        with:
+          command: release/build ARCH=${{ matrix.arch }} VERSION=${{ needs.version.outputs.version }}
+      - name: Keep the image
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: image-${{ matrix.arch }}
+          path: dist/*.qcow2*
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish ${{ needs.version.outputs.tag }}
+    needs: [version, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - name: Collect the images
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          path: dist
+          merge-multiple: true
+      - name: Publish release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.version.outputs.tag }}
+          target_commitish: ${{ github.sha }}
+          name: ${{ needs.version.outputs.tag }}
+          draft: false
+          prerelease: false
+          generate_release_notes: true
+          fail_on_unmatched_files: true
+          make_latest: legacy
+          files: |
+            dist/*.qcow2
+            dist/*.qcow2.sha256
+
+  alias:
+    name: Point ${{ needs.version.outputs.alias }} to ${{ needs.version.outputs.tag }}
+    needs: [version, publish]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find the newest image of this NixOS release
+        id: newest
+        uses: mr-chelyshkin/actions/get-tags@v1
+        with:
+          pattern: ${{ needs.version.outputs.alias-pattern }}
+          require-release: 'true'
+      - name: Collect the images
+        if: fromJSON(steps.newest.outputs.tags)[0].tag == needs.version.outputs.tag
+        uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: image-*
+          path: dist
+          merge-multiple: true
+      - name: Name the images after the NixOS release
+        if: fromJSON(steps.newest.outputs.tags)[0].tag == needs.version.outputs.tag
+        env:
+          VERSION: ${{ needs.version.outputs.version }}
+          ALIAS: ${{ needs.version.outputs.alias }}
+        run: |
+          set -euo pipefail
+          mkdir alias
+          for arch in aarch64 x86_64; do
+            name="limanix-${ALIAS#v}-$arch.qcow2"
+            cp "dist/limanix-$VERSION-$arch.qcow2" "alias/$name"
+            (cd alias && sha256sum "$name" > "$name.sha256")
+          done
+      - name: Move ${{ needs.version.outputs.alias }}
+        if: fromJSON(steps.newest.outputs.tags)[0].tag == needs.version.outputs.tag
+        env:
+          GH_TOKEN: ${{ github.token }}
+          ALIAS: ${{ needs.version.outputs.alias }}
+        run: |
+          set -euo pipefail
+          if gh api "repos/$GITHUB_REPOSITORY/git/ref/tags/$ALIAS" > /dev/null 2>&1; then
+            gh api -X PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$ALIAS" -f sha="$GITHUB_SHA" -F force=true
+          else
+            gh api "repos/$GITHUB_REPOSITORY/git/refs" -f ref="refs/tags/$ALIAS" -f sha="$GITHUB_SHA"
+          fi
+      - name: Publish ${{ needs.version.outputs.alias }}
+        if: fromJSON(steps.newest.outputs.tags)[0].tag == needs.version.outputs.tag
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ needs.version.outputs.alias }}
+          name: ${{ needs.version.outputs.alias }}
+          body: The newest image of NixOS ${{ needs.version.outputs.alias }}, currently ${{ needs.version.outputs.tag }}. Pin a dated release instead of this one.
+          draft: false
+          prerelease: false
+          make_latest: false
+          fail_on_unmatched_files: true
+          overwrite_files: true
+          files: |
+            alias/*.qcow2
+            alias/*.qcow2.sha256

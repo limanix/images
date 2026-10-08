@@ -1,0 +1,20 @@
+# OS files
+.DS_Store
+
+# IDE
+.vscode/
+.idea/
+
+# Task runner cache
+.cache/
+.task/
+
+# Python cache
+__pycache__/
+*.py[cod]
+
+# Build artifacts
+result*
+
+build/
+dist/
