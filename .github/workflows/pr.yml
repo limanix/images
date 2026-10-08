@@ -30,9 +30,35 @@ jobs:
     permissions:
       contents: read
 
+  changes:
+    name: Changed files
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      image: ${{ steps.image.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Look for changes to the image
+        id: image
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: |
+          set -euo pipefail
+          files='^(flake\.nix|flake\.lock|image\.nix|scripts/build-image\.sh|Taskfile\.yml|\.github/workflows/pr\.yml)$'
+          if git diff --name-only "$BASE" HEAD | grep -qE "$files"; then
+            echo "changed=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "The image is unchanged; no build"
+            echo "changed=false" >> "$GITHUB_OUTPUT"
+          fi
+
   image:
     name: Image (${{ matrix.arch }})
-    needs: [markdown, nix]
+    needs: [markdown, nix, changes]
+    if: needs.changes.outputs.image == 'true'
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 60
     strategy:
@@ -54,7 +80,7 @@ jobs:
 
   gate:
     if: always()
-    needs: [markdown, nix, image]
+    needs: [markdown, nix, changes, image]
     runs-on: ubuntu-24.04
     timeout-minutes: 5
     permissions:
@@ -63,3 +89,4 @@ jobs:
       - uses: mr-chelyshkin/actions/check-job-results@v1
         with:
           results: ${{ toJSON(needs) }}
+          skipped: image
