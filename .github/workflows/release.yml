@@ -18,7 +18,6 @@ jobs:
     name: Build (${{ matrix.arch }})
     if: github.ref == 'refs/heads/main'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
     strategy:
       matrix:
         include:
@@ -46,7 +45,6 @@ jobs:
     name: Publish
     needs: build
     runs-on: ubuntu-24.04
-    timeout-minutes: 15
     permissions:
       contents: write
     steps:

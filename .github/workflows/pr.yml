@@ -16,7 +16,6 @@ jobs:
   markdown:
     name: Markdown formatting
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -33,7 +32,6 @@ jobs:
   changes:
     name: Changed files
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
     outputs:
       image: ${{ steps.image.outputs.changed }}
     steps:
@@ -52,7 +50,6 @@ jobs:
     needs: [markdown, nix, changes]
     if: needs.changes.outputs.image == 'true'
     runs-on: ${{ matrix.runner }}
-    timeout-minutes: 60
     strategy:
       fail-fast: false
       matrix:
@@ -74,7 +71,6 @@ jobs:
     if: always()
     needs: [markdown, nix, changes, image]
     runs-on: ubuntu-24.04
-    timeout-minutes: 5
     permissions:
       contents: read
     steps:
