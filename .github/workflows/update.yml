@@ -13,79 +13,24 @@ permissions:
   contents: read
 
 jobs:
-  catalog:
-    name: Newest catalog release
-    runs-on: ubuntu-24.04
-    timeout-minutes: 5
-    outputs:
-      tag: ${{ steps.base.outputs.tag }}
-      rev: ${{ steps.base.outputs.rev }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          repository: limanix/modules
-          fetch-depth: 0
-          persist-credentials: false
-      - name: Find the newest catalog release
-        id: newest
-        uses: mr-chelyshkin/actions/get-tags@v1
-        with:
-          repository: limanix/modules
-          pattern: '^v[1-9][0-9]*$'
-          require-release: 'true'
-      - name: Read its Nixpkgs revision
-        id: base
-        env:
-          TAG: ${{ fromJSON(steps.newest.outputs.tags)[0].tag }}
-        run: |
-          set -euo pipefail
-          rev=$(git show "$TAG:flake.lock" | jq -er '.nodes.nixpkgs.locked.rev')
-          echo "Catalog $TAG uses Nixpkgs $rev"
-          {
-            echo "tag=$TAG"
-            echo "rev=$rev"
-          } >> "$GITHUB_OUTPUT"
-
   update:
-    name: Move to catalog ${{ needs.catalog.outputs.tag }}
-    needs: catalog
+    name: Move to the newest catalog
     runs-on: ubuntu-24.04
     timeout-minutes: 20
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      - name: Compare with the image
-        id: compare
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ github.token }}
+      - name: Use the newest catalog release
+        id: catalog
         env:
           GH_TOKEN: ${{ github.token }}
-          REV: ${{ needs.catalog.outputs.rev }}
-        run: |
-          set -euo pipefail
-          current=$(jq -er '[.nodes[] | .locked? | select(.owner == "NixOS" and .repo == "nixpkgs") | .rev] | unique | .[0]' flake.lock)
-          if [ "$current" = "$REV" ]; then
-            echo "The image already uses Nixpkgs $REV"
-            echo "stale=false" >> "$GITHUB_OUTPUT"
-            exit 0
-          fi
-          release() {
-            gh api "repos/NixOS/nixpkgs/contents/lib/.version?ref=$1" -H 'Accept: application/vnd.github.raw+json'
-          }
-          from=$(release "$current")
-          to=$(release "$REV")
-          echo "The image uses Nixpkgs $current ($from); the catalog moved to $REV ($to)"
-          {
-            echo "stale=true"
-            echo "from=$from"
-            echo "to=$to"
-          } >> "$GITHUB_OUTPUT"
-      - name: Use the catalog release
-        if: steps.compare.outputs.stale == 'true'
-        uses: mr-chelyshkin/actions/invoke-taskfile@v1
-        with:
-          command: catalog/update TAG=${{ needs.catalog.outputs.tag }}
+        run: bash scripts/update-catalog.sh >> "$GITHUB_OUTPUT"
       - name: Create token
-        if: steps.compare.outputs.stale == 'true'
+        if: steps.catalog.outputs.before != steps.catalog.outputs.after
         id: app-token
         uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
         with:
@@ -96,35 +41,23 @@ jobs:
           repositories: images
           owner: limanix
       - name: Open the pull request
-        if: steps.compare.outputs.stale == 'true'
+        if: steps.catalog.outputs.before != steps.catalog.outputs.after
+        id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: update/catalog
+          add-paths: |
+            flake.nix
+            flake.lock
+          commit-message: Use catalog ${{ steps.catalog.outputs.tag }}
+          title: Use catalog ${{ steps.catalog.outputs.tag }} (image ${{ steps.catalog.outputs.after }})
+          body: >-
+            Moves the image from ${{ steps.catalog.outputs.before }} to ${{ steps.catalog.outputs.after }}.
+            ${{ steps.catalog.outputs.major == 'true' && 'This is a new NixOS release and does not merge itself: fix image.nix if the build fails, and boot the image in Lima before merging.' || 'It merges itself once the checks pass, and the merge releases the image.' }}
+      - name: Merge once the checks pass
+        if: steps.pr.outputs.pull-request-number && steps.catalog.outputs.major == 'false'
         env:
           GH_TOKEN: ${{ steps.app-token.outputs.token }}
-          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
-          TAG: ${{ needs.catalog.outputs.tag }}
-          REV: ${{ needs.catalog.outputs.rev }}
-          FROM: ${{ steps.compare.outputs.from }}
-          TO: ${{ steps.compare.outputs.to }}
-        run: |
-          set -euo pipefail
-          branch="update/catalog-$TAG"
-          if [ "$(gh pr list --head "$branch" --state open --json number --jq length)" != 0 ]; then
-            echo "A pull request for $TAG is already open"
-            exit 0
-          fi
-          bot="${APP_SLUG}[bot]"
-          git config user.name "$bot"
-          git config user.email "$(gh api "users/$bot" --jq .id)+$bot@users.noreply.github.com"
-          git switch -c "$branch"
-          git add flake.nix flake.lock
-          git commit -m "Use catalog $TAG"
-          git push --force "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "$branch"
-          if [ "$FROM" = "$TO" ]; then
-            gh pr create --base main --head "$branch" \
-              --title "Use catalog $TAG" \
-              --body "Catalog $TAG moved its base to Nixpkgs $REV. The merge releases the new image."
-            gh pr merge "$branch" --auto --squash
-          else
-            gh pr create --base main --head "$branch" \
-              --title "Move to NixOS $TO with catalog $TAG" \
-              --body "Catalog $TAG moved from NixOS $FROM to $TO (Nixpkgs $REV). This pull request does not merge itself: fix \`image.nix\` if the build fails, and boot the image in Lima before merging."
-          fi
+          NUMBER: ${{ steps.pr.outputs.pull-request-number }}
+        run: gh pr merge "$NUMBER" --repo "$GITHUB_REPOSITORY" --auto --squash

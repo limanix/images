@@ -21,9 +21,8 @@ PR ─▶ merge into main ─▶ release v<nixos>.<date> ─▶ v<nixos> points 
 `<nixos>` is the NixOS release of the catalog's Nixpkgs, such as `YY.05` or
 `YY.11`. `<date>` is the date of that Nixpkgs revision, `YYYYMMDD`.
 
-- A merge that changes `flake.nix`, `flake.lock` or `image.nix` releases the
+- A merge that moves the catalog base, which changes `flake.lock`, releases the
   image. Other changes release nothing.
-- A second release on the same Nixpkgs adds a number: `v<nixos>.<date>.<n>`.
 - Each release carries `limanix-<version>-<arch>.qcow2` and its `.sha256`.
 - `v<nixos>` holds the newest image of that NixOS release, under names without a
   date: `limanix-<nixos>-<arch>.qcow2`. Each NixOS release gets its own; a new
@@ -36,7 +35,7 @@ PR ─▶ merge into main ─▶ release v<nixos>.<date> ─▶ v<nixos> points 
 | -- | -- |
 | New catalog base | In `flake.nix`, move the catalog release (`modules/vN`) and open a PR. Every Monday the Update workflow does this itself and merges once the checks pass |
 | New NixOS release | The same, but the Update workflow's PR waits: boot the image in Lima, then merge |
-| The image itself | Edit `image.nix` |
+| The image itself | Edit `image.nix`; the change ships with the next catalog base |
 
 ## Build locally
 

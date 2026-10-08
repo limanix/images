@@ -45,15 +45,7 @@ jobs:
         id: image
         env:
           BASE: ${{ github.event.pull_request.base.sha }}
-        run: |
-          set -euo pipefail
-          files='^(flake\.nix|flake\.lock|image\.nix|scripts/build-image\.sh|Taskfile\.yml|\.github/workflows/pr\.yml)$'
-          if git diff --name-only "$BASE" HEAD | grep -qE "$files"; then
-            echo "changed=true" >> "$GITHUB_OUTPUT"
-          else
-            echo "The image is unchanged; no build"
-            echo "changed=false" >> "$GITHUB_OUTPUT"
-          fi
+        run: bash scripts/image-changed.sh "$BASE" >> "$GITHUB_OUTPUT"
 
   image:
     name: Image (${{ matrix.arch }})
