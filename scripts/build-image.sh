@@ -7,6 +7,9 @@
 set -eu
 
 arch=$1
+
+# The checkout belongs to the host user; Nix reads it as root.
+git config --global --add safe.directory "$PWD"
 flags="--extra-experimental-features nix-command --extra-experimental-features flakes"
 flags="$flags --option build-users-group nixbld"
 

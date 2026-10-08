@@ -34,8 +34,8 @@ PR ─▶ merge into main ─▶ release v<nixos>.<date> ─▶ v<nixos> points 
 
 | Change | What to do |
 | -- | -- |
-| New catalog base | In `flake.nix`, move the catalog release (`modules/vN`) and open a PR |
-| New NixOS release | The same, and boot the image in Lima before the merge |
+| New catalog base | In `flake.nix`, move the catalog release (`modules/vN`) and open a PR. Every Monday the Update workflow does this itself and merges once the checks pass |
+| New NixOS release | The same, but the Update workflow's PR waits: boot the image in Lima, then merge |
 | The image itself | Edit `image.nix` |
 
 ## Build locally

@@ -1,0 +1,130 @@
+name: Update
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  catalog:
+    name: Newest catalog release
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      tag: ${{ steps.base.outputs.tag }}
+      rev: ${{ steps.base.outputs.rev }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          repository: limanix/modules
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Find the newest catalog release
+        id: newest
+        uses: mr-chelyshkin/actions/get-tags@v1
+        with:
+          repository: limanix/modules
+          pattern: '^v[1-9][0-9]*$'
+          require-release: 'true'
+      - name: Read its Nixpkgs revision
+        id: base
+        env:
+          TAG: ${{ fromJSON(steps.newest.outputs.tags)[0].tag }}
+        run: |
+          set -euo pipefail
+          rev=$(git show "$TAG:flake.lock" | jq -er '.nodes.nixpkgs.locked.rev')
+          echo "Catalog $TAG uses Nixpkgs $rev"
+          {
+            echo "tag=$TAG"
+            echo "rev=$rev"
+          } >> "$GITHUB_OUTPUT"
+
+  update:
+    name: Move to catalog ${{ needs.catalog.outputs.tag }}
+    needs: catalog
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Compare with the image
+        id: compare
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REV: ${{ needs.catalog.outputs.rev }}
+        run: |
+          set -euo pipefail
+          current=$(jq -er '[.nodes[] | .locked? | select(.owner == "NixOS" and .repo == "nixpkgs") | .rev] | unique | .[0]' flake.lock)
+          if [ "$current" = "$REV" ]; then
+            echo "The image already uses Nixpkgs $REV"
+            echo "stale=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          release() {
+            gh api "repos/NixOS/nixpkgs/contents/lib/.version?ref=$1" -H 'Accept: application/vnd.github.raw+json'
+          }
+          from=$(release "$current")
+          to=$(release "$REV")
+          echo "The image uses Nixpkgs $current ($from); the catalog moved to $REV ($to)"
+          {
+            echo "stale=true"
+            echo "from=$from"
+            echo "to=$to"
+          } >> "$GITHUB_OUTPUT"
+      - name: Use the catalog release
+        if: steps.compare.outputs.stale == 'true'
+        uses: mr-chelyshkin/actions/invoke-taskfile@v1
+        with:
+          command: catalog/update TAG=${{ needs.catalog.outputs.tag }}
+      - name: Create token
+        if: steps.compare.outputs.stale == 'true'
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          repositories: images
+          owner: limanix
+      - name: Open the pull request
+        if: steps.compare.outputs.stale == 'true'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          APP_SLUG: ${{ steps.app-token.outputs.app-slug }}
+          TAG: ${{ needs.catalog.outputs.tag }}
+          REV: ${{ needs.catalog.outputs.rev }}
+          FROM: ${{ steps.compare.outputs.from }}
+          TO: ${{ steps.compare.outputs.to }}
+        run: |
+          set -euo pipefail
+          branch="update/catalog-$TAG"
+          if [ "$(gh pr list --head "$branch" --state open --json number --jq length)" != 0 ]; then
+            echo "A pull request for $TAG is already open"
+            exit 0
+          fi
+          bot="${APP_SLUG}[bot]"
+          git config user.name "$bot"
+          git config user.email "$(gh api "users/$bot" --jq .id)+$bot@users.noreply.github.com"
+          git switch -c "$branch"
+          git add flake.nix flake.lock
+          git commit -m "Use catalog $TAG"
+          git push --force "https://x-access-token:$GH_TOKEN@github.com/$GITHUB_REPOSITORY.git" "$branch"
+          if [ "$FROM" = "$TO" ]; then
+            gh pr create --base main --head "$branch" \
+              --title "Use catalog $TAG" \
+              --body "Catalog $TAG moved its base to Nixpkgs $REV. The merge releases the new image."
+            gh pr merge "$branch" --auto --squash
+          else
+            gh pr create --base main --head "$branch" \
+              --title "Move to NixOS $TO with catalog $TAG" \
+              --body "Catalog $TAG moved from NixOS $FROM to $TO (Nixpkgs $REV). This pull request does not merge itself: fix \`image.nix\` if the build fails, and boot the image in Lima before merging."
+          fi

@@ -56,14 +56,29 @@ tasks:
         vars:
           FMT_PATHS: '{{.markdown_paths}}'
 
+  catalog/update:
+    desc: Use catalog release TAG, such as v4, and lock its Nixpkgs
+    requires:
+      vars: [TAG]
+    cmds:
+      - >-
+        awk -v tag={{.TAG | shellQuote}}
+        '{ sub(/github:limanix\/modules\/v[0-9]+/, "github:limanix/modules/" tag) } 1'
+        flake.nix > flake.nix.new && mv flake.nix.new flake.nix
+      - task: nix:_nix/tool
+        vars:
+          CMD: >-
+            sh -c 'git config --global --add safe.directory "$PWD"
+            && nix flake lock --extra-experimental-features "nix-command flakes"'
+
   release/version:
     desc: Write the image version to dist/version
     cmds:
       - task: nix:_nix/tool
         vars:
           CMD: >-
-            sh -c 'mkdir -p dist && nix eval --extra-experimental-features "nix-command flakes"
-            --raw .#version > dist/version'
+            sh -c 'git config --global --add safe.directory "$PWD" && mkdir -p dist
+            && nix eval --extra-experimental-features "nix-command flakes" --raw .#version > dist/version'
 
   release/build:
     desc: Build the base image
