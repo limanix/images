@@ -1,0 +1,80 @@
+name: PR flow
+
+on:
+  pull_request:
+    branches: [main]
+    types: [opened, reopened, synchronize]
+
+concurrency:
+  group: pr-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  markdown:
+    name: Markdown formatting
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: mr-chelyshkin/actions/invoke-taskfile@v1
+        with:
+          command: ci/markdown/fmt
+
+  nix:
+    uses: mr-chelyshkin/actions/.github/workflows/pr-nix.yml@v1
+    permissions:
+      contents: read
+
+  changes:
+    name: Changed files
+    runs-on: ubuntu-24.04
+    outputs:
+      image: ${{ steps.image.outputs.changed }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Look for changes to the image
+        id: image
+        env:
+          BASE: ${{ github.event.pull_request.base.sha }}
+        run: bash scripts/image-changed.sh "$BASE" >> "$GITHUB_OUTPUT"
+
+  image:
+    name: Image (${{ matrix.arch }})
+    needs: [markdown, nix, changes]
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ${{ matrix.runner }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { arch: aarch64, runner: ubuntu-24.04-arm }
+          - { arch: x86_64, runner: ubuntu-24.04 }
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Allow user namespaces for systemd-repart
+        run: sudo sysctl -w kernel.apparmor_restrict_unprivileged_userns=0
+      - name: Build the image
+        uses: mr-chelyshkin/actions/invoke-taskfile@v1
+        with:
+          command: release/build ARCH=${{ matrix.arch }}
+
+  gate:
+    if: always()
+    needs: [markdown, nix, changes, image]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+    steps:
+      - uses: mr-chelyshkin/actions/check-job-results@v1
+        with:
+          results: ${{ toJSON(needs) }}
+          skipped: image

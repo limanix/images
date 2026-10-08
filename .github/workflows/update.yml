@@ -1,0 +1,62 @@
+name: Update
+
+on:
+  schedule:
+    - cron: '0 5 * * 1'
+  workflow_dispatch:
+
+concurrency:
+  group: update
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+jobs:
+  update:
+    name: Move to the newest catalog
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: cachix/install-nix-action@13d8dd58da0234aa297dedd986986ccb8e7f3e24 # v31.11.1
+        with:
+          github_access_token: ${{ github.token }}
+      - name: Use the newest catalog release
+        id: catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: bash scripts/update-catalog.sh >> "$GITHUB_OUTPUT"
+      - name: Create token
+        if: steps.catalog.outputs.before != steps.catalog.outputs.after
+        id: app-token
+        uses: actions/create-github-app-token@bcd2ba49218906704ab6c1aa796996da409d3eb1 # v3.2.0
+        with:
+          client-id: ${{ vars.RELEASE_APP_CLIENT_ID }}
+          private-key: ${{ secrets.RELEASE_APP_PRIVATE_KEY }}
+          permission-contents: write
+          permission-pull-requests: write
+          repositories: images
+          owner: limanix
+      - name: Open the pull request
+        if: steps.catalog.outputs.before != steps.catalog.outputs.after
+        id: pr
+        uses: peter-evans/create-pull-request@5f6978faf089d4d20b00c7766989d076bb2fc7f1 # v8.1.1
+        with:
+          token: ${{ steps.app-token.outputs.token }}
+          branch: update/catalog
+          add-paths: |
+            flake.nix
+            flake.lock
+          commit-message: Use catalog ${{ steps.catalog.outputs.tag }}
+          title: Use catalog ${{ steps.catalog.outputs.tag }} (image ${{ steps.catalog.outputs.after }})
+          body: >-
+            Moves the image from ${{ steps.catalog.outputs.before }} to ${{ steps.catalog.outputs.after }}.
+            ${{ steps.catalog.outputs.major == 'true' && 'This is a new NixOS release and does not merge itself: fix image.nix if the build fails, and boot the image in Lima before merging.' || 'It merges itself once the checks pass, and the merge releases the image.' }}
+      - name: Merge once the checks pass
+        if: steps.pr.outputs.pull-request-number && steps.catalog.outputs.major == 'false'
+        env:
+          GH_TOKEN: ${{ steps.app-token.outputs.token }}
+          NUMBER: ${{ steps.pr.outputs.pull-request-number }}
+        run: gh pr merge "$NUMBER" --repo "$GITHUB_REPOSITORY" --auto --squash
